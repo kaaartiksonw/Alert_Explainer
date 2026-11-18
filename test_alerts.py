@@ -12,19 +12,34 @@ from database import Base, get_db
 from main import app
 
 
-def _create_alert(client: TestClient, **overrides: str | float) -> dict[str, Any]:
-    payload: dict[str, str | float] = {
-        "title": "Test alert",
-        "severity": "warning",
-        "source": "test-source",
-        "metric_name": "test_metric",
-        "metric_value": 50.0,
-        "threshold": 40.0,
-    }
-    payload.update(overrides)
-    response = client.post("/alerts/", json=payload)
-    assert response.status_code == 201
-    return response.json()
+@pytest.fixture
+def client() -> Iterator[TestClient]:
+    test_engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(bind=test_engine)
+    TestingSessionLocal = sessionmaker(
+        autocommit=False,
+        autoflush=False,
+        bind=test_engine,
+    )
+
+    def override_get_db() -> Iterator[Session]:
+        db = TestingSessionLocal()
+        try:
+            yield db
+        finally:
+            db.close()
+
+    app.dependency_overrides[get_db] = override_get_db
+    try:
+        with TestClient(app) as test_client:
+            yield test_client
+    finally:
+        app.dependency_overrides.clear()
+        test_engine.dispose()
 
 
 def test_create_alert(client: TestClient) -> None:
@@ -86,6 +101,21 @@ def test_explain_alert(client: TestClient) -> None:
     )
 
 
+def _create_alert(client: TestClient, **overrides: str | float) -> dict[str, Any]:
+    payload: dict[str, str | float] = {
+        "title": "Test alert",
+        "severity": "warning",
+        "source": "test-source",
+        "metric_name": "test_metric",
+        "metric_value": 50.0,
+        "threshold": 40.0,
+    }
+    payload.update(overrides)
+    response = client.post("/alerts/", json=payload)
+    assert response.status_code == 201
+    return response.json()
+
+
 def test_explain_alert_for_nonexistent_id_returns_404(
     client: TestClient,
 ) -> None:
@@ -131,33 +161,62 @@ def test_explain_alert_with_zero_threshold_does_not_crash(
 
     assert response.status_code == 200
     assert "threshold of 0.0" in response.json()["explanation"]
+def _create_alert(client: TestClient, **overrides: str | float) -> dict:
+    """Create an alert through the API and return its JSON response."""
+    payload: dict[str, str | float] = {
+        "title": "Test alert",
+        "severity": "warning",
+        "source": "test-source",
+        "metric_name": "test_metric",
+        "metric_value": 50.0,
+        "threshold": 40.0,
+    }
+    payload.update(overrides)
+    response = client.post("/alerts", json=payload)
+    assert response.status_code == 201
+    return response.json()
 
 
-@pytest.fixture
-def client() -> Iterator[TestClient]:
-    test_engine = create_engine(
-        "sqlite://",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
+def test_explain_alert_for_nonexistent_id_returns_404(client: TestClient) -> None:
+    response = client.post("/alerts/999/explain")
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Alert not found"
+
+
+def test_explain_alert_when_metric_is_below_threshold(
+    client: TestClient,
+) -> None:
+    alert = _create_alert(
+        client,
+        title="Connection pool below minimum",
+        severity="warning",
+        source="db-pool",
+        metric_name="active_connections",
+        metric_value=2,
+        threshold=10,
     )
-    Base.metadata.create_all(bind=test_engine)
-    TestingSessionLocal = sessionmaker(
-        autocommit=False,
-        autoflush=False,
-        bind=test_engine,
+
+    response = client.post(f"/alerts/{alert['id']}/explain")
+
+    assert response.status_code == 200
+    assert "fell below its threshold" in response.json()["explanation"]
+
+
+def test_explain_alert_with_zero_threshold_does_not_crash(
+    client: TestClient,
+) -> None:
+    alert = _create_alert(
+        client,
+        title="Unexpected traffic on idle endpoint",
+        severity="info",
+        source="edge-cache",
+        metric_name="request_count",
+        metric_value=5,
+        threshold=0,
     )
 
-    def override_get_db() -> Iterator[Session]:
-        db = TestingSessionLocal()
-        try:
-            yield db
-        finally:
-            db.close()
+    response = client.post(f"/alerts/{alert['id']}/explain")
 
-    app.dependency_overrides[get_db] = override_get_db
-    try:
-        with TestClient(app) as test_client:
-            yield test_client
-    finally:
-        app.dependency_overrides.clear()
-        test_engine.dispose()
+    assert response.status_code == 200
+    assert "threshold of 0.0" in response.json()["explanation"]
