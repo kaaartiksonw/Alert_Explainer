@@ -8,6 +8,23 @@ NEXT_STEPS = {
 
 
 def generate_explanation(alert: Alert) -> str:
+    """Build an explanation from the alert's own fields using fixed rules.
+
+    Args:
+        alert: Alert whose severity selects a recommended next step and whose
+            metric value is compared with its threshold. Its title, source,
+            and metric name are included in the explanation.
+
+    Returns:
+        A rule-based explanation with a recommended next step and acknowledgement
+        text. A truthy optional resolved_by value is uppercased; otherwise the
+        acknowledgement is "Not yet acknowledged". No external AI or LLM
+        service is called.
+
+    Raises:
+        KeyError: If the severity is not present in NEXT_STEPS.
+        AttributeError: If a truthy resolved_by value has no upper method.
+    """
     if alert.metric_value > alert.threshold:
         comparison = "exceeded"
     elif alert.metric_value < alert.threshold:
